@@ -18,6 +18,10 @@ GROQ_FALLBACK_MODEL = "llama-3.3-70b-versatile"
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SANDBOX_PATH = os.path.join(PROJECT_ROOT, "sandbox_files")
 TODO_SERVER_PATH = os.path.join(PROJECT_ROOT, "mcp_servers", "todo_server.py")
+STATE_CHANGING_TOOLS = {
+    "write_file", "edit_file", "create_directory", "move_file",  # filesystem
+    "add_task", "complete_task",                                  # todo
+}
 
 
 class NexusAgent:
@@ -26,6 +30,41 @@ class NexusAgent:
         self.groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
         self.sessions = {}
         self._stack = AsyncExitStack()
+
+    async def plan(self, user_message: str):
+        """Ask Gemini what it wants to do, but don't execute anything yet."""
+        all_tools, tool_owner = await self._merged_tools()
+        gemini_tools = types.Tool(function_declarations=all_tools)
+        contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
+
+        response = await self.gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools]),
+        )
+        contents.append(response.candidates[0].content)
+        return response, contents, tool_owner
+
+    async def execute_calls(self, function_calls, tool_owner, contents):
+        """Actually run approved tool calls, then get one final summarizing reply."""
+        tool_response_parts = []
+        trail = []
+        for fc in function_calls:
+            args = fc.args or {}
+            result = await tool_owner[fc.name].call_tool(fc.name, args)
+            result_text = result.content[0].text if result.content else "[]"
+            trail.append((fc.name, args, result_text))
+            tool_response_parts.append(
+                types.Part.from_function_response(name=fc.name, response={"result": result_text})
+            )
+        contents.append(types.Content(role="user", parts=tool_response_parts))
+
+        response = await self.gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(temperature=0),  # no tools this round — force a plain-text reply
+        )
+        return response.text, trail
 
     async def connect_servers(self):
         # Filesystem server — Windows needs npx launched through cmd /c
