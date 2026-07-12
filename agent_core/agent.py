@@ -13,7 +13,7 @@ from mcp.client.stdio import stdio_client
 
 load_dotenv()
 
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 GROQ_FALLBACK_MODEL = "llama-3.3-70b-versatile"
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
