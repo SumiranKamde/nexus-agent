@@ -48,17 +48,14 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 if st.session_state.pending:
-    calls = st.session_state.pending["function_calls"]
-    desc = ", ".join(f"{fc.name}({dict(fc.args or {})})" for fc in calls)
+    calls = st.session_state.pending.function_calls
+    desc = ", ".join(f"{c.name}({c.args})" for c in calls)
     st.warning(f"Nexus wants to: {desc}")
     col1, col2 = st.columns(2)
 
     if col1.button("✅ Confirm"):
-        pending = st.session_state.pending
         with st.spinner("Running approved action..."):
-            text, trail = bg.run(agent.execute_calls(
-                pending["function_calls"], pending["tool_owner"], pending["contents"]
-            ))
+            text, trail = bg.run(agent.execute_calls(st.session_state.pending))
         st.session_state.messages.append({"role": "assistant", "content": text})
         st.session_state.pending = None
         st.rerun()
@@ -72,19 +69,15 @@ else:
     if prompt := st.chat_input("Ask Nexus to check your tasks or files..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.spinner("Thinking..."):
-            response, contents, tool_owner = bg.run(agent.plan(prompt))
+            plan_result = bg.run(agent.plan(prompt))
 
-        if response.function_calls:
-            if any(fc.name in STATE_CHANGING_TOOLS for fc in response.function_calls):
-                st.session_state.pending = {
-                    "function_calls": response.function_calls,
-                    "contents": contents,
-                    "tool_owner": tool_owner,
-                }
+        if plan_result.function_calls:
+            if any(c.name in STATE_CHANGING_TOOLS for c in plan_result.function_calls):
+                st.session_state.pending = plan_result
             else:
-                text, trail = bg.run(agent.execute_calls(response.function_calls, tool_owner, contents))
+                text, trail = bg.run(agent.execute_calls(plan_result))
                 st.session_state.messages.append({"role": "assistant", "content": text})
         else:
-            st.session_state.messages.append({"role": "assistant", "content": response.text})
+            st.session_state.messages.append({"role": "assistant", "content": plan_result.text})
 
         st.rerun()

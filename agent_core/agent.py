@@ -1,12 +1,13 @@
 import asyncio
 import json
 import os
+from dataclasses import dataclass
 from contextlib import AsyncExitStack
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from groq import Groq
+from groq import Groq, BadRequestError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -22,6 +23,26 @@ STATE_CHANGING_TOOLS = {
     "write_file", "edit_file", "create_directory", "move_file",  # filesystem
     "add_task", "complete_task",                                  # todo
 }
+SYSTEM_PROMPT = (
+    "You are Nexus, a friendly personal productivity assistant. You have tools for "
+    "reading/managing files and a to-do list. Only use a tool when the request actually "
+    "needs one of those specific things. For anything else — general knowledge, casual "
+    "conversation, quick math, jokes — just answer directly in plain text. Never refuse "
+    "a normal question just because it doesn't match a tool."
+)
+
+@dataclass
+class ToolCall:
+    name: str
+    args: dict
+    id: str = None
+
+@dataclass
+class PlanResult:
+    text: str
+    function_calls: list
+    provider: str   # "gemini" or "groq" — lets execute_calls() know which conversation state to use
+    state: dict
 
 
 class NexusAgent:
@@ -31,8 +52,14 @@ class NexusAgent:
         self.sessions = {}
         self._stack = AsyncExitStack()
 
-    async def plan(self, user_message: str):
-        """Ask Gemini what it wants to do, but don't execute anything yet."""
+    async def plan(self, user_message: str) -> PlanResult:
+        try:
+            return await self._plan_gemini(user_message)
+        except Exception as e:
+            print(f"[Nexus] Gemini unavailable ({e}); falling back to Groq Llama...")
+            return await self._plan_groq(user_message)
+
+    async def _plan_gemini(self, user_message: str) -> PlanResult:
         all_tools, tool_owner = await self._merged_tools()
         gemini_tools = types.Tool(function_declarations=all_tools)
         contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
@@ -40,32 +67,120 @@ class NexusAgent:
         response = await self.gemini_client.aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
-            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools]),
+            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=SYSTEM_PROMPT),
         )
         contents.append(response.candidates[0].content)
-        return response, contents, tool_owner
 
-    async def execute_calls(self, function_calls, tool_owner, contents):
-        """Actually run approved tool calls, then get one final summarizing reply."""
+        calls = [ToolCall(fc.name, dict(fc.args or {})) for fc in (response.function_calls or [])]
+        return PlanResult(
+            text=response.text if not calls else None,
+            function_calls=calls,
+            provider="gemini",
+            state={"contents": contents, "tool_owner": tool_owner},
+        )
+
+    async def _plan_groq(self, user_message: str) -> PlanResult:
+        all_tools, tool_owner = await self._merged_tools()
+        tools_schema = [{"type": "function", "function": t} for t in all_tools]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_message}]
+
+        for attempt in range(2):
+            try:
+                response = self.groq_client.chat.completions.create(
+                    model=GROQ_FALLBACK_MODEL,
+                    messages=messages,
+                    tools=tools_schema,
+                    tool_choice="auto",
+                    temperature=0,  # deterministic output — cuts down on malformed tool-call tokens
+                )
+                msg = response.choices[0].message
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content,
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function",
+                         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                        for tc in (msg.tool_calls or [])
+                    ],
+                })
+                calls = [ToolCall(tc.function.name, json.loads(tc.function.arguments or "{}"), id=tc.id)
+                         for tc in (msg.tool_calls or [])]
+                return PlanResult(
+                    text=(msg.content or "I'm not sure how to respond to that — could you rephrase?") if not calls else None,
+                    function_calls=calls,
+                    provider="groq",
+                    state={"messages": messages, "tool_owner": tool_owner, "tools_schema": tools_schema},
+                )
+            except BadRequestError as e:
+                print(f"[Nexus] Groq produced a malformed tool call (attempt {attempt + 1}/2); retrying...")
+                last_error = e
+
+        # Both attempts failed — degrade gracefully instead of crashing the app
+        return PlanResult(
+            text=("I'm having trouble planning that request right now — both Gemini and Groq hit issues. "
+                  "Could you try rephrasing, or try again in a moment?"),
+            function_calls=[],
+            provider="groq",
+            state={},
+        )
+    async def execute_calls(self, plan_result: PlanResult):
+        if plan_result.provider == "gemini":
+            return await self._execute_calls_gemini(plan_result)
+        return await self._execute_calls_groq(plan_result)
+
+    async def _execute_calls_gemini(self, plan_result: PlanResult):
+        contents = plan_result.state["contents"]
+        tool_owner = plan_result.state["tool_owner"]
         tool_response_parts = []
         trail = []
-        for fc in function_calls:
-            args = fc.args or {}
-            result = await tool_owner[fc.name].call_tool(fc.name, args)
+        for fc in plan_result.function_calls:
+            result = await tool_owner[fc.name].call_tool(fc.name, fc.args)
             result_text = result.content[0].text if result.content else "[]"
-            trail.append((fc.name, args, result_text))
+            trail.append((fc.name, fc.args, result_text))
             tool_response_parts.append(
                 types.Part.from_function_response(name=fc.name, response={"result": result_text})
             )
         contents.append(types.Content(role="user", parts=tool_response_parts))
 
-        response = await self.gemini_client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(temperature=0),  # no tools this round — force a plain-text reply
-        )
-        return response.text, trail
+        try:
+            response = await self.gemini_client.aio.models.generate_content(
+                model=GEMINI_MODEL, contents=contents,
+                config=types.GenerateContentConfig(temperature=0),
+            )
+            return response.text, trail
+        except Exception as e:
+            print(f"[Nexus] Gemini unavailable for summary ({e}); asking Groq to summarize instead...")
+            summary_prompt = (
+                "I just performed these actions on the user's behalf:\n" +
+                "\n".join(f"- {name}({args}) -> {result}" for name, args, result in trail) +
+                "\nWrite a short, friendly 1-2 sentence reply confirming what was done."
+            )
+            completion = self.groq_client.chat.completions.create(
+                model=GROQ_FALLBACK_MODEL,
+                messages=[{"role": "user", "content": summary_prompt}],
+            )
+            return completion.choices[0].message.content, trail
 
+    async def _execute_calls_groq(self, plan_result: PlanResult):
+        messages = plan_result.state["messages"]
+        tool_owner = plan_result.state["tool_owner"]
+        trail = []
+        for fc in plan_result.function_calls:
+            result = await tool_owner[fc.name].call_tool(fc.name, fc.args)
+            result_text = result.content[0].text if result.content else "[]"
+            trail.append((fc.name, fc.args, result_text))
+            messages.append({"role": "tool", "tool_call_id": fc.id, "content": result_text})
+
+        # No 'tools' passed here on purpose — same trick as the Gemini path.
+        # Without tools attached, the model can't chain another call and leave
+        # .content empty; it's forced to answer in plain text.
+        response = self.groq_client.chat.completions.create(
+            model=GROQ_FALLBACK_MODEL,
+            messages=messages,
+            temperature=0,
+        )
+        text = response.choices[0].message.content or "Done."
+        return text, trail
     async def connect_servers(self):
         # Filesystem server — Windows needs npx launched through cmd /c
         fs_params = StdioServerParameters(
