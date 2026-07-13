@@ -25,10 +25,14 @@ STATE_CHANGING_TOOLS = {
 }
 SYSTEM_PROMPT = (
     "You are Nexus, a friendly personal productivity assistant. You have tools for "
-    "reading/managing files and a to-do list. Only use a tool when the request actually "
-    "needs one of those specific things. For anything else — general knowledge, casual "
-    "conversation, quick math, jokes — just answer directly in plain text. Never refuse "
-    "a normal question just because it doesn't match a tool."
+    "reading/managing files, a to-do list, searching the live web, and getting the real "
+    "current date/time.\n\n"
+    "IMPORTANT: Your own knowledge has a training cutoff and is NOT reliable for anything "
+    "time-sensitive. For the current date or time, you MUST use the get_current_time tool — "
+    "never state a time or date from memory. For prices, exchange rates, news, or current "
+    "events, you MUST use the search tool rather than answering from memory.\n\n"
+    "For everything else — general knowledge, casual conversation, quick math, jokes — just "
+    "answer directly in plain text without using a tool."
 )
 
 @dataclass
@@ -198,6 +202,13 @@ class NexusAgent:
         todo_session = await self._stack.enter_async_context(ClientSession(read, write))
         await todo_session.initialize()
         self.sessions["todo"] = todo_session
+
+        # Web Search server — DuckDuckGo, no API key needed
+        search_params = StdioServerParameters(command="duckduckgo-mcp-server", args=[])
+        read, write = await self._stack.enter_async_context(stdio_client(search_params))
+        search_session = await self._stack.enter_async_context(ClientSession(read, write))
+        await search_session.initialize()
+        self.sessions["websearch"] = search_session
 
         for name, session in self.sessions.items():
             tools = (await session.list_tools()).tools

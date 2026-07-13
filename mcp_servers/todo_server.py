@@ -1,6 +1,8 @@
 from fastmcp import FastMCP
 import sqlite3
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 mcp = FastMCP("todo-server")
 
@@ -17,6 +19,18 @@ def get_conn():
         )
     """)
     return conn
+
+
+
+@mcp.tool()
+def get_current_time(timezone: str = "Asia/Kolkata") -> str:
+    """Get the current real date and time. Defaults to India Standard Time if no timezone is given."""
+    try:
+        tz = ZoneInfo(timezone)
+    except Exception:
+        tz = ZoneInfo("Asia/Kolkata")
+    now = datetime.now(tz)
+    return now.strftime("%A, %d %B %Y, %I:%M %p %Z")
 
 @mcp.tool()
 def add_task(task: str, due: str = "") -> str:
