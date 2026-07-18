@@ -45,6 +45,13 @@ def get_conn():
             risk_level TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
     return conn
 
 
@@ -128,6 +135,35 @@ def list_tasks() -> list:
     conn.close()
     return [{"id": r[0], "task": r[1], "due": r[2]} for r in rows]
 
+@mcp.tool()
+def remember(fact: str) -> str:
+    """Save a lasting fact or preference about the user for future conversations."""
+    conn = get_conn()
+    conn.execute("INSERT INTO memories (fact, created_at) VALUES (?, ?)", (fact, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
+    result = f"Remembered: {fact}"
+    log_action("remember", {"fact": fact}, result)
+    return result
+
+@mcp.tool()
+def list_memories() -> list:
+    """List everything currently remembered about the user, with each memory's id."""
+    conn = get_conn()
+    rows = conn.execute("SELECT id, fact, created_at FROM memories ORDER BY id").fetchall()
+    conn.close()
+    return [{"id": r[0], "fact": r[1], "since": r[2]} for r in rows]
+
+@mcp.tool()
+def forget(memory_id: int) -> str:
+    """Delete a specific remembered fact by its id (use list_memories first to find the id)."""
+    conn = get_conn()
+    conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    conn.commit()
+    conn.close()
+    result = f"Forgot memory {memory_id}"
+    log_action("forget", {"memory_id": memory_id}, result)
+    return result
 
 if __name__ == "__main__":
     mcp.run()

@@ -25,18 +25,20 @@ STATE_CHANGING_TOOLS = {
 }
 SYSTEM_PROMPT = (
     "You are Nexus, a friendly personal productivity assistant. You have access to a set of "
-    "tools for managing files, a to-do list (including viewing an audit log of past actions and "
-    "undoing the most recent one), searching the live web, and getting the real current date/time. "
-    "Always check the full list of tools provided to you for this request before deciding whether "
-    "one applies — do not assume a request has no matching tool just because it isn't explicitly "
-    "named in this instruction; new tools may have been added since this was written.\n\n"
+    "tools for managing files, a to-do list (including an audit log and undo), searching the "
+    "live web, getting the real current date/time, and remembering facts about the user across "
+    "conversations (remember, list_memories, forget). Always check the full list of tools "
+    "provided to you for this request before deciding whether one applies — do not assume a "
+    "request has no matching tool just because it isn't explicitly named here.\n\n"
+    "If the user shares a lasting preference, habit, or personal detail (e.g. 'I prefer evening "
+    "reminders', 'my name is Sumiran', 'I usually add groceries on Fridays'), use the remember "
+    "tool to save it — but don't save trivial one-off details.\n\n"
     "IMPORTANT: Your own knowledge has a training cutoff and is NOT reliable for anything "
     "time-sensitive. For the current date or time, you MUST use the get_current_time tool. For "
     "prices, exchange rates, news, or current events, you MUST use the search tool. For questions "
-    "about past actions Nexus has taken (e.g. 'undo that', 'show my audit log'), you MUST use the "
-    "undo_last_action or get_audit_log tools rather than guessing. Never answer any of these from memory.\n\n"
-    "If a request has no matching tool (e.g. deleting a file, when no delete tool exists), say so "
-    "plainly and briefly — do not invent a result.\n\n"
+    "about past actions Nexus has taken, you MUST use the undo_last_action or get_audit_log tools "
+    "rather than guessing. Never answer any of these from memory.\n\n"
+    "If a request has no matching tool, say so plainly and briefly — do not invent a result.\n\n"
     "For everything else — general knowledge, casual conversation, quick math, jokes — just "
     "answer directly in plain text without using a tool."
 )
@@ -77,7 +79,7 @@ class NexusAgent:
         response = await self.gemini_client.aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
-            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=SYSTEM_PROMPT),
+            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=await self._get_system_prompt()),
         )
         contents.append(response.candidates[0].content)
         if response.function_calls:
@@ -98,7 +100,7 @@ class NexusAgent:
     async def _plan_groq(self, user_message: str) -> PlanResult:
         all_tools, tool_owner = await self._merged_tools()
         tools_schema = [{"type": "function", "function": t} for t in all_tools]
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_message}]
+        messages = [{"role": "system", "content": await self._get_system_prompt()}, {"role": "user", "content": user_message}]
 
         for attempt in range(2):
             try:
@@ -250,6 +252,19 @@ class NexusAgent:
                 all_tools.append({"name": t.name, "description": t.description or "", "parameters": clean_schema})
                 tool_owner[t.name] = session
         return all_tools, tool_owner
+    
+    async def _get_system_prompt(self) -> str:
+        try:
+            result = await self.sessions["todo"].call_tool("list_memories", {})
+            memories_text = result.content[0].text if result.content else "[]"
+            memories = json.loads(memories_text)
+        except Exception:
+            memories = []
+
+        if memories:
+            facts = "\n".join(f"- {m['fact']}" for m in memories)
+            return SYSTEM_PROMPT + f"\n\nHere is what you currently remember about this user:\n{facts}\n\nUse this to personalize your responses where relevant."
+        return SYSTEM_PROMPT
 
     async def ask(self, user_message: str) -> str:
         try:
