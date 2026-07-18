@@ -20,17 +20,23 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SANDBOX_PATH = os.path.join(PROJECT_ROOT, "sandbox_files")
 TODO_SERVER_PATH = os.path.join(PROJECT_ROOT, "mcp_servers", "todo_server.py")
 STATE_CHANGING_TOOLS = {
-    "write_file", "edit_file", "create_directory", "move_file",  # filesystem
-    "add_task", "complete_task",                                  # todo
+    "write_file", "edit_file", "create_directory", "move_file",
+    "add_task", "complete_task", "undo_last_action",
 }
 SYSTEM_PROMPT = (
-    "You are Nexus, a friendly personal productivity assistant. You have tools for "
-    "reading/managing files, a to-do list, searching the live web, and getting the real "
-    "current date/time.\n\n"
+    "You are Nexus, a friendly personal productivity assistant. You have access to a set of "
+    "tools for managing files, a to-do list (including viewing an audit log of past actions and "
+    "undoing the most recent one), searching the live web, and getting the real current date/time. "
+    "Always check the full list of tools provided to you for this request before deciding whether "
+    "one applies — do not assume a request has no matching tool just because it isn't explicitly "
+    "named in this instruction; new tools may have been added since this was written.\n\n"
     "IMPORTANT: Your own knowledge has a training cutoff and is NOT reliable for anything "
-    "time-sensitive. For the current date or time, you MUST use the get_current_time tool — "
-    "never state a time or date from memory. For prices, exchange rates, news, or current "
-    "events, you MUST use the search tool rather than answering from memory.\n\n"
+    "time-sensitive. For the current date or time, you MUST use the get_current_time tool. For "
+    "prices, exchange rates, news, or current events, you MUST use the search tool. For questions "
+    "about past actions Nexus has taken (e.g. 'undo that', 'show my audit log'), you MUST use the "
+    "undo_last_action or get_audit_log tools rather than guessing. Never answer any of these from memory.\n\n"
+    "If a request has no matching tool (e.g. deleting a file, when no delete tool exists), say so "
+    "plainly and briefly — do not invent a result.\n\n"
     "For everything else — general knowledge, casual conversation, quick math, jokes — just "
     "answer directly in plain text without using a tool."
 )
@@ -74,6 +80,12 @@ class NexusAgent:
             config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=SYSTEM_PROMPT),
         )
         contents.append(response.candidates[0].content)
+        if response.function_calls:
+            print(f"[Nexus/Gemini] Plan for {user_message!r}:")
+            for fc in response.function_calls:
+                print(f"  -> wants to call {fc.name}({dict(fc.args or {})})")
+        else:
+            print(f"[Nexus/Gemini] Plan for {user_message!r}: no tool call, direct text = {response.text!r}")
 
         calls = [ToolCall(fc.name, dict(fc.args or {})) for fc in (response.function_calls or [])]
         return PlanResult(
@@ -98,6 +110,13 @@ class NexusAgent:
                     temperature=0,  # deterministic output — cuts down on malformed tool-call tokens
                 )
                 msg = response.choices[0].message
+                if msg.tool_calls:
+                    print(f"[Nexus/Groq] Plan for {user_message!r}:")
+                    for tc in msg.tool_calls:
+                        print(f"  -> wants to call {tc.function.name}({tc.function.arguments})")
+                else:
+                    print(f"[Nexus/Groq] Plan for {user_message!r}: no tool call, direct text = {msg.content!r}")
+
                 messages.append({
                     "role": "assistant",
                     "content": msg.content,
@@ -140,6 +159,7 @@ class NexusAgent:
         for fc in plan_result.function_calls:
             result = await tool_owner[fc.name].call_tool(fc.name, fc.args)
             result_text = result.content[0].text if result.content else "[]"
+            print(f"[Nexus/Execute] {fc.name}({fc.args}) -> {result_text}")
             trail.append((fc.name, fc.args, result_text))
             tool_response_parts.append(
                 types.Part.from_function_response(name=fc.name, response={"result": result_text})
@@ -172,6 +192,7 @@ class NexusAgent:
         for fc in plan_result.function_calls:
             result = await tool_owner[fc.name].call_tool(fc.name, fc.args)
             result_text = result.content[0].text if result.content else "[]"
+            print(f"[Nexus/Execute] {fc.name}({fc.args}) -> {result_text}")
             trail.append((fc.name, fc.args, result_text))
             messages.append({"role": "tool", "tool_call_id": fc.id, "content": result_text})
 
