@@ -43,6 +43,14 @@ SYSTEM_PROMPT = (
     "answer directly in plain text without using a tool."
 )
 
+PROACTIVE_PROMPT = (
+    "This is an automatic background check, not a live conversation with the user. Review "
+    "the user's current to-do list and anything you remember about them. Decide whether "
+    "there is something worth proactively reminding them about right now (e.g. tasks piling "
+    "up, something time-sensitive). If so, call create_notification with a short, friendly "
+    "message. If there is genuinely nothing worth surfacing right now, do not call any tool."
+)
+
 @dataclass
 class ToolCall:
     name: str
@@ -240,14 +248,14 @@ class NexusAgent:
     async def close(self):
         await self._stack.aclose()
 
-    async def _merged_tools(self):
-        """Combine tool lists from every connected server into one manifest,
-        and remember which session owns each tool name so we can route calls back."""
+    async def _merged_tools(self, exclude_state_changing=False):
         all_tools = []
         tool_owner = {}
         for session in self.sessions.values():
             mcp_tools = (await session.list_tools()).tools
             for t in mcp_tools:
+                if exclude_state_changing and t.name in STATE_CHANGING_TOOLS:
+                    continue
                 clean_schema = {k: v for k, v in t.inputSchema.items() if k not in ("additionalProperties", "$schema")}
                 all_tools.append({"name": t.name, "description": t.description or "", "parameters": clean_schema})
                 tool_owner[t.name] = session
@@ -347,7 +355,94 @@ class NexusAgent:
         print("--- end trail ---\n")
 
         return msg.content
+    
+    async def proactive_check(self):
+        try:
+            await self._proactive_gemini()
+        except Exception as e:
+            print(f"[Nexus/Proactive] Gemini unavailable ({e}); trying Groq...")
+            try:
+                await self._proactive_groq()
+            except Exception as e2:
+                print(f"[Nexus/Proactive] Skipped this cycle — both providers failed: {e2}")
 
+    async def _proactive_gemini(self):
+        all_tools, tool_owner = await self._merged_tools(exclude_state_changing=True)
+        gemini_tools = types.Tool(function_declarations=all_tools)
+        contents = [types.Content(role="user", parts=[types.Part(text=PROACTIVE_PROMPT)])]
+
+        response = await self.gemini_client.aio.models.generate_content(
+            model=GEMINI_MODEL, contents=contents,
+            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=await self._get_system_prompt()),
+        )
+        contents.append(response.candidates[0].content)
+
+        notified = False
+        turns = 0
+        while response.function_calls and turns < 4:
+            turns += 1
+            tool_response_parts = []
+            for fc in response.function_calls:
+                args = fc.args or {}
+                print(f"[Nexus/Proactive] Calling {fc.name}({args})")
+                result = await tool_owner[fc.name].call_tool(fc.name, args)
+                result_text = result.content[0].text if result.content else "[]"
+                print(f"[Nexus/Proactive] -> {result_text}")
+                if fc.name == "create_notification":
+                    notified = True
+                tool_response_parts.append(
+                    types.Part.from_function_response(name=fc.name, response={"result": result_text})
+                )
+            contents.append(types.Content(role="user", parts=tool_response_parts))
+            response = await self.gemini_client.aio.models.generate_content(
+                model=GEMINI_MODEL, contents=contents,
+                config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=await self._get_system_prompt()),
+            )
+            contents.append(response.candidates[0].content)
+
+        if not notified:
+            print("[Nexus/Proactive] Cycle complete — nothing surfaced.")
+
+    async def _proactive_groq(self):
+        all_tools, tool_owner = await self._merged_tools(exclude_state_changing=True)
+        tools_schema = [{"type": "function", "function": t} for t in all_tools]
+        messages = [{"role": "system", "content": await self._get_system_prompt()}, {"role": "user", "content": PROACTIVE_PROMPT}]
+
+        response = self.groq_client.chat.completions.create(
+            model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto", temperature=0,
+        )
+        msg = response.choices[0].message
+
+        notified = False
+        turns = 0
+        while msg.tool_calls and turns < 4:
+            turns += 1
+            messages.append({
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in msg.tool_calls
+                ],
+            })
+            for call in msg.tool_calls:
+                args = json.loads(call.function.arguments or "{}")
+                print(f"[Nexus/Proactive] Calling {call.function.name}({args})")
+                result = await tool_owner[call.function.name].call_tool(call.function.name, args)
+                result_text = result.content[0].text if result.content else "[]"
+                print(f"[Nexus/Proactive] -> {result_text}")
+                if call.function.name == "create_notification":
+                    notified = True
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
+            response = self.groq_client.chat.completions.create(
+                model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto", temperature=0,
+            )
+            msg = response.choices[0].message
+
+        if not notified:
+            print("[Nexus/Proactive] Cycle complete — nothing surfaced.")
+   
 
 async def main():
     agent = NexusAgent()

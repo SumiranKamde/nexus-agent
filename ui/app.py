@@ -2,6 +2,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import json
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from streamlit_autorefresh import st_autorefresh
+
 import asyncio
 import threading
 
@@ -31,12 +35,35 @@ def get_agent():
     bg = BackgroundLoop()
     agent = NexusAgent()
     bg.run(agent.connect_servers())
+
+    async def _start_scheduler():
+        scheduler = AsyncIOScheduler(event_loop=asyncio.get_event_loop())
+        # Demo interval — fires every 2 minutes so you can see it live.
+        # For real use, swap to a daily check instead:
+        #   scheduler.add_job(agent.proactive_check, "cron", hour=8, minute=0)
+        scheduler.add_job(agent.proactive_check, "cron", hour=8, minute=0)  # once daily, 8 AM
+        scheduler.start()
+
+    bg.run(_start_scheduler())
     return agent, bg
 
 
 agent, bg = get_agent()
 
 st.title("🟣 Nexus — Personal Productivity Agent")
+
+try:
+    notif_result = bg.run(agent.sessions["todo"].call_tool("list_notifications", {"unseen_only": True}))
+    notifications = json.loads(notif_result.content[0].text) if notif_result.content else []
+except Exception:
+    notifications = []
+
+if notifications:
+    for n in notifications:
+        st.info(f"🔔 {n['message']}")
+    if st.button("Dismiss all"):
+        bg.run(agent.sessions["todo"].call_tool("mark_notifications_seen", {}))
+        st.rerun()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []

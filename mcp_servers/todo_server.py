@@ -52,6 +52,14 @@ def get_conn():
             created_at TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            seen INTEGER DEFAULT 0
+        )
+    """)
     return conn
 
 
@@ -164,6 +172,33 @@ def forget(memory_id: int) -> str:
     result = f"Forgot memory {memory_id}"
     log_action("forget", {"memory_id": memory_id}, result)
     return result
+
+@mcp.tool()
+def create_notification(message: str) -> str:
+    """Create a proactive notification for the user to see in the UI."""
+    conn = get_conn()
+    conn.execute("INSERT INTO notifications (message, created_at) VALUES (?, ?)", (message, datetime.now(timezone.utc).isoformat()))
+    conn.commit()
+    conn.close()
+    return f"Notification created: {message}"
+
+@mcp.tool()
+def list_notifications(unseen_only: bool = True) -> list:
+    """List notifications. By default, only unseen ones."""
+    conn = get_conn()
+    query = "SELECT id, message, created_at FROM notifications" + (" WHERE seen = 0" if unseen_only else "")
+    rows = conn.execute(query).fetchall()
+    conn.close()
+    return [{"id": r[0], "message": r[1], "created_at": r[2]} for r in rows]
+
+@mcp.tool()
+def mark_notifications_seen() -> str:
+    """Mark all notifications as seen/dismissed."""
+    conn = get_conn()
+    conn.execute("UPDATE notifications SET seen = 1")
+    conn.commit()
+    conn.close()
+    return "All notifications marked as seen"
 
 if __name__ == "__main__":
     mcp.run()
