@@ -41,8 +41,7 @@ def get_agent():
         # Demo interval — fires every 2 minutes so you can see it live.
         # For real use, swap to a daily check instead:
         #   scheduler.add_job(agent.proactive_check, "cron", hour=8, minute=0)
-        scheduler.add_job(agent.proactive_check, "cron", hour=8, minute=0)  # once daily, 8 AM
-        scheduler.start()
+        scheduler.add_job(agent.proactive_check, "cron", hour=8, minute=0)
 
     bg.run(_start_scheduler())
     return agent, bg

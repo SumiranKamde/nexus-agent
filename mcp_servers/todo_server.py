@@ -6,6 +6,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+from twilio.rest import Client as TwilioClient
+
+load_dotenv()
 
 RISK_LEVELS = {
     "add_task": "low",
@@ -199,6 +203,25 @@ def mark_notifications_seen() -> str:
     conn.commit()
     conn.close()
     return "All notifications marked as seen"
+
+TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")
+TWILIO_TO = os.environ.get("TWILIO_WHATSAPP_TO")
+
+@mcp.tool()
+def send_whatsapp(message: str) -> str:
+    """Send a WhatsApp message to the user's phone via Twilio."""
+    if not all([TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, TWILIO_TO]):
+        return "WhatsApp is not configured — missing Twilio credentials in .env"
+    try:
+        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        msg = client.messages.create(body=message, from_=TWILIO_FROM, to=TWILIO_TO)
+        result = f"WhatsApp message sent (sid: {msg.sid})"
+    except Exception as e:
+        result = f"Failed to send WhatsApp message: {e}"
+    log_action("send_whatsapp", {"message": message}, result)
+    return result
 
 if __name__ == "__main__":
     mcp.run()
