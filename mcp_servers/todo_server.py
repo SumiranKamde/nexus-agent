@@ -223,5 +223,43 @@ def send_whatsapp(message: str) -> str:
     log_action("send_whatsapp", {"message": message}, result)
     return result
 
+SANDBOX_PATH = os.path.join(os.path.dirname(__file__), "..", "sandbox_files")
+
+@mcp.tool()
+def send_file_via_whatsapp(file_name: str) -> str:
+    """Read a text file from the sandbox folder and send its contents to the user's WhatsApp."""
+    file_path = os.path.join(SANDBOX_PATH, file_name)
+    if not os.path.abspath(file_path).startswith(os.path.abspath(SANDBOX_PATH)):
+        return "Refused: file must be inside the sandbox folder."
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_name}"
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except Exception as e:
+        return f"Could not read file: {e}"
+
+    original_len = len(content)
+    prefix = f"📄 {file_name}:\n\n"
+    suffix = "\n...(truncated, file exceeds WhatsApp's 1600-character message limit)"
+    max_total = 1550  # safety margin below Twilio's hard 1600-char limit
+    max_content_len = max_total - len(prefix) - len(suffix)
+
+    truncated = original_len > max_content_len
+    if truncated:
+        content = content[:max_content_len] + suffix
+    message = prefix + content
+
+    if not all([TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, TWILIO_TO]):
+        return "WhatsApp is not configured — missing Twilio credentials in .env"
+    try:
+        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        msg = client.messages.create(body=message, from_=TWILIO_FROM, to=TWILIO_TO)
+        note = " (truncated to fit WhatsApp's limit)" if truncated else ""
+        result = f"Sent {file_name} via WhatsApp (sid: {msg.sid}){note}"
+    except Exception as e:
+        result = f"Failed to send file via WhatsApp: {e}"
+    log_action("send_file_via_whatsapp", {"file_name": file_name}, result)
+    return result
 if __name__ == "__main__":
     mcp.run()

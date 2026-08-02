@@ -56,6 +56,8 @@ PROACTIVE_PROMPT = (
     "now, do not call any tool."
 )
 
+
+
 @dataclass
 class ToolCall:
     name: str
@@ -66,8 +68,9 @@ class ToolCall:
 class PlanResult:
     text: str
     function_calls: list
-    provider: str   # "gemini" or "groq" — lets execute_calls() know which conversation state to use
+    provider: str
     state: dict
+    trail: list = None
 
 
 class NexusAgent:
@@ -88,79 +91,80 @@ class NexusAgent:
         all_tools, tool_owner = await self._merged_tools()
         gemini_tools = types.Tool(function_declarations=all_tools)
         contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
+        system_prompt = await self._get_system_prompt()
 
-        response = await self.gemini_client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=await self._get_system_prompt()),
-        )
-        contents.append(response.candidates[0].content)
-        if response.function_calls:
-            print(f"[Nexus/Gemini] Plan for {user_message!r}:")
-            for fc in response.function_calls:
-                print(f"  -> wants to call {fc.name}({dict(fc.args or {})})")
-        else:
-            print(f"[Nexus/Gemini] Plan for {user_message!r}: no tool call, direct text = {response.text!r}")
+        plan_trail = []
+        for turn in range(5):
+            response = await self.gemini_client.aio.models.generate_content(
+                model=GEMINI_MODEL, contents=contents,
+                config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools], system_instruction=system_prompt),
+            )
+            contents.append(response.candidates[0].content)
+            calls = list(response.function_calls or [])
 
-        calls = [ToolCall(fc.name, dict(fc.args or {})) for fc in (response.function_calls or [])]
-        return PlanResult(
-            text=response.text if not calls else None,
-            function_calls=calls,
-            provider="gemini",
-            state={"contents": contents, "tool_owner": tool_owner},
-        )
+            if not calls:
+                return PlanResult(text=_safe_text(response), function_calls=[], provider="gemini", state={}, trail=plan_trail)
+
+            risky = [fc for fc in calls if fc.name in STATE_CHANGING_TOOLS]
+            if risky:
+                tool_calls = [ToolCall(fc.name, dict(fc.args or {})) for fc in calls]
+                return PlanResult(text=None, function_calls=tool_calls, provider="gemini", state={"contents": contents, "tool_owner": tool_owner}, trail=plan_trail)
+
+            # All read-only this round — execute automatically and let it keep reasoning
+            tool_response_parts = []
+            for fc in calls:
+                args = fc.args or {}
+                print(f"[Nexus/Gemini] Auto-executing read-only {fc.name}({args})")
+                result = await tool_owner[fc.name].call_tool(fc.name, args)
+                result_text = result.content[0].text if result.content else "[]"
+                print(f"[Nexus/Gemini] -> {result_text}")
+                plan_trail.append((fc.name, args, result_text))
+                tool_response_parts.append(types.Part.from_function_response(name=fc.name, response={"result": result_text}))
+            contents.append(types.Content(role="user", parts=tool_response_parts))
+
+        return PlanResult(text="That request needed too many steps — could you break it into smaller parts?", function_calls=[], provider="gemini", state={}, trail=plan_trail)
 
     async def _plan_groq(self, user_message: str) -> PlanResult:
         all_tools, tool_owner = await self._merged_tools()
         tools_schema = [{"type": "function", "function": t} for t in all_tools]
-        messages = [{"role": "system", "content": await self._get_system_prompt()}, {"role": "user", "content": user_message}]
+        system_prompt = await self._get_system_prompt()
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
 
-        for attempt in range(2):
+        plan_trail = []
+        for turn in range(5):
             try:
                 response = self.groq_client.chat.completions.create(
-                    model=GROQ_FALLBACK_MODEL,
-                    messages=messages,
-                    tools=tools_schema,
-                    tool_choice="auto",
-                    temperature=0,  # deterministic output — cuts down on malformed tool-call tokens
-                )
-                msg = response.choices[0].message
-                if msg.tool_calls:
-                    print(f"[Nexus/Groq] Plan for {user_message!r}:")
-                    for tc in msg.tool_calls:
-                        print(f"  -> wants to call {tc.function.name}({tc.function.arguments})")
-                else:
-                    print(f"[Nexus/Groq] Plan for {user_message!r}: no tool call, direct text = {msg.content!r}")
-
-                messages.append({
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": [
-                        {"id": tc.id, "type": "function",
-                         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                        for tc in (msg.tool_calls or [])
-                    ],
-                })
-                calls = [ToolCall(tc.function.name, json.loads(tc.function.arguments or "{}"), id=tc.id)
-                         for tc in (msg.tool_calls or [])]
-                return PlanResult(
-                    text=(msg.content or "I'm not sure how to respond to that — could you rephrase?") if not calls else None,
-                    function_calls=calls,
-                    provider="groq",
-                    state={"messages": messages, "tool_owner": tool_owner, "tools_schema": tools_schema},
+                    model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto", temperature=0,
                 )
             except BadRequestError as e:
-                print(f"[Nexus] Groq produced a malformed tool call (attempt {attempt + 1}/2); retrying...")
-                last_error = e
+                print(f"[Nexus/Groq] Malformed tool call, stopping this attempt: {e}")
+                return PlanResult(text="I'm having trouble planning that request — could you try rephrasing?", function_calls=[], provider="groq", state={})
 
-        # Both attempts failed — degrade gracefully instead of crashing the app
-        return PlanResult(
-            text=("I'm having trouble planning that request right now — both Gemini and Groq hit issues. "
-                  "Could you try rephrasing, or try again in a moment?"),
-            function_calls=[],
-            provider="groq",
-            state={},
-        )
+            msg = response.choices[0].message
+            tool_calls = msg.tool_calls or []
+
+            if not tool_calls:
+                return PlanResult(text=msg.content or "I'm not sure how to respond to that — could you rephrase?", function_calls=[], provider="groq", state={})
+
+            messages.append({
+                "role": "assistant", "content": msg.content,
+                "tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in tool_calls],
+            })
+
+            risky = [tc for tc in tool_calls if tc.function.name in STATE_CHANGING_TOOLS]
+            if risky:
+                calls = [ToolCall(tc.function.name, json.loads(tc.function.arguments or "{}"), id=tc.id) for tc in tool_calls]
+                return PlanResult(text=None, function_calls=calls, provider="groq", state={"messages": messages, "tool_owner": tool_owner, "tools_schema": tools_schema})
+
+            for tc in tool_calls:
+                args = json.loads(tc.function.arguments or "{}")
+                print(f"[Nexus/Groq] Auto-executing read-only {tc.function.name}({args})")
+                result = await tool_owner[tc.function.name].call_tool(tc.function.name, args)
+                result_text = result.content[0].text if result.content else "[]"
+                print(f"[Nexus/Groq] -> {result_text}")
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+        return PlanResult(text="That request needed too many steps — could you break it into smaller parts?", function_calls=[], provider="groq", state={})
     async def execute_calls(self, plan_result: PlanResult):
         if plan_result.provider == "gemini":
             return await self._execute_calls_gemini(plan_result)
@@ -447,6 +451,20 @@ class NexusAgent:
 
         if not notified:
             print("[Nexus/Proactive] Cycle complete — nothing surfaced.")
+            
+    async def send_task_summary_whatsapp(self):
+        try:
+            result = await self.sessions["todo"].call_tool("list_tasks", {})
+            tasks = json.loads(result.content[0].text) if result.content else []
+            if not tasks:
+                message = "📋 Daily check-in: your to-do list is empty. Nice work!"
+            else:
+                lines = [f"{i+1}. {t['task']}" + (f" (due {t['due']})" if t.get('due') else "") for i, t in enumerate(tasks)]
+                message = "📋 Your to-do list today:\n" + "\n".join(lines)
+            send_result = await self.sessions["todo"].call_tool("send_whatsapp", {"message": message})
+            print(f"[Nexus/Scheduled] Task summary: {send_result.content[0].text if send_result.content else send_result}")
+        except Exception as e:
+            print(f"[Nexus/Scheduled] Failed to send task summary: {e}")
    
 
 async def main():
@@ -457,7 +475,11 @@ async def main():
         print("Nexus:", reply)
     finally:
         await agent.close()
-
+        
+async def main():
+    agent = NexusAgent()
+    await agent.connect_servers()
+    t
 
 if __name__ == "__main__":
     asyncio.run(main())
