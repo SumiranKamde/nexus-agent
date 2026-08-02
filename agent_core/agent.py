@@ -132,14 +132,17 @@ class NexusAgent:
 
         plan_trail = []
         for turn in range(5):
+            response = None
+        for attempt in range(2):
             try:
                 response = self.groq_client.chat.completions.create(
                     model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto", temperature=0,
                 )
+                break
             except BadRequestError as e:
-                print(f"[Nexus/Groq] Malformed tool call, stopping this attempt: {e}")
-                return PlanResult(text="I'm having trouble planning that request — could you try rephrasing?", function_calls=[], provider="groq", state={})
-
+                print(f"[Nexus/Groq] Malformed tool call (attempt {attempt + 1}/2): {e}")
+        if response is None:
+            return PlanResult(text="I'm having trouble planning that request — could you try rephrasing?", function_calls=[], provider="groq", state={}, trail=[])
             msg = response.choices[0].message
             tool_calls = msg.tool_calls or []
 
@@ -173,24 +176,48 @@ class NexusAgent:
     async def _execute_calls_gemini(self, plan_result: PlanResult):
         contents = plan_result.state["contents"]
         tool_owner = plan_result.state["tool_owner"]
+        trail = list(plan_result.trail or [])
+
         tool_response_parts = []
-        trail = []
         for fc in plan_result.function_calls:
             result = await tool_owner[fc.name].call_tool(fc.name, fc.args)
             result_text = result.content[0].text if result.content else "[]"
-            print(f"[Nexus/Execute] {fc.name}({fc.args}) -> {result_text}")
             trail.append((fc.name, fc.args, result_text))
             tool_response_parts.append(
                 types.Part.from_function_response(name=fc.name, response={"result": result_text})
             )
         contents.append(types.Content(role="user", parts=tool_response_parts))
 
+        # Give it a few turns to chain safe (non-state-changing) follow-ups,
+        # e.g. "...and send it on WhatsApp" — without needing a second confirmation.
+        safe_tools, safe_owner = await self._merged_tools(exclude_state_changing=True)
+        gemini_safe_tools = types.Tool(function_declarations=safe_tools)
+
         try:
+            for _ in range(3):
+                response = await self.gemini_client.aio.models.generate_content(
+                    model=GEMINI_MODEL, contents=contents,
+                    config=types.GenerateContentConfig(temperature=0, tools=[gemini_safe_tools]),
+                )
+                contents.append(response.candidates[0].content)
+                calls = list(response.function_calls or [])
+                if not calls:
+                    return _safe_text(response), trail
+
+                follow_parts = []
+                for fc in calls:
+                    args = fc.args or {}
+                    result = await safe_owner[fc.name].call_tool(fc.name, args)
+                    result_text = result.content[0].text if result.content else "[]"
+                    trail.append((fc.name, args, result_text))
+                    follow_parts.append(types.Part.from_function_response(name=fc.name, response={"result": result_text}))
+                contents.append(types.Content(role="user", parts=follow_parts))
+
             response = await self.gemini_client.aio.models.generate_content(
-                model=GEMINI_MODEL, contents=contents,
-                config=types.GenerateContentConfig(temperature=0),
+                model=GEMINI_MODEL, contents=contents, config=types.GenerateContentConfig(temperature=0),
             )
-            return response.text, trail
+            return _safe_text(response), trail
+
         except Exception as e:
             print(f"[Nexus] Gemini unavailable for summary ({e}); asking Groq to summarize instead...")
             summary_prompt = (
@@ -199,8 +226,7 @@ class NexusAgent:
                 "\nWrite a short, friendly 1-2 sentence reply confirming what was done."
             )
             completion = self.groq_client.chat.completions.create(
-                model=GROQ_FALLBACK_MODEL,
-                messages=[{"role": "user", "content": summary_prompt}],
+                model=GROQ_FALLBACK_MODEL, messages=[{"role": "user", "content": summary_prompt}],
             )
             return completion.choices[0].message.content, trail
 
