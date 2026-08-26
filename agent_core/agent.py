@@ -1,6 +1,7 @@
-import asyncio
 import json
 import os
+import shutil
+import sys
 from dataclasses import dataclass
 from contextlib import AsyncExitStack
 
@@ -75,11 +76,44 @@ class PlanResult:
     state: dict
     trail: list = None
 
+def _console_script(name: str) -> str:
+    """Locate a console script installed alongside the running interpreter.
+
+    Looking next to sys.executable first means the venv's copy wins even when
+    the venv isn't activated; PATH and then the bare name are fallbacks.
+    """
+    scripts_dir = os.path.dirname(sys.executable)
+    return shutil.which(name, path=scripts_dir) or shutil.which(name) or name
+
+
 def _safe_text(response, fallback="I'm not able to do that with my current tools — could you rephrase, or ask for something else?"):
     try:
         return response.text or fallback
     except Exception:
         return fallback
+
+# How many earlier chat turns to replay into the prompt. Keeps follow-ups like
+# "add the second one to my list" working without unbounded token growth.
+MAX_HISTORY_MESSAGES = 10
+
+def _history_pairs(history, limit=MAX_HISTORY_MESSAGES):
+    """Normalize UI chat history into [(role, text)], oldest first.
+
+    Skips blank/None content (a plan can return text=None) and drops any
+    leading assistant turns, since both providers expect the replayed
+    conversation to open with a user message.
+    """
+    pairs = [
+        (msg["role"], msg["content"])
+        for msg in history or []
+        if msg.get("role") in ("user", "assistant")
+        and isinstance(msg.get("content"), str)
+        and msg["content"].strip()
+    ]
+    pairs = pairs[-limit:]
+    while pairs and pairs[0][0] == "assistant":
+        pairs.pop(0)
+    return pairs
 
 class NexusAgent:
     def __init__(self):
@@ -90,23 +124,32 @@ class NexusAgent:
         self.sessions = {}
         self._stack = AsyncExitStack()
 
-    async def plan(self, user_message: str) -> PlanResult:
+    async def plan(self, user_message: str, history=None) -> PlanResult:
+        """Plan a response to user_message.
+
+        history is the prior chat as [{"role": "user"|"assistant", "content": str}],
+        oldest first, excluding user_message itself.
+        """
         if self.gemini_client:
             try:
-                return await self._plan_gemini(user_message)
+                return await self._plan_gemini(user_message, history)
             except Exception as e:
                 print(f"[Nexus] Gemini unavailable ({e}); falling back to Groq Llama...")
         if self.groq_client:
-            return await self._plan_groq(user_message)
+            return await self._plan_groq(user_message, history)
         return PlanResult(
             text="No AI provider is configured. Add GEMINI_API_KEY or GROQ_API_KEY to .env.",
             function_calls=[], provider="none", state={}, trail=[],
         )
 
-    async def _plan_gemini(self, user_message: str) -> PlanResult:
+    async def _plan_gemini(self, user_message: str, history=None) -> PlanResult:
         all_tools, tool_owner = await self._merged_tools()
         gemini_tools = types.Tool(function_declarations=all_tools)
-        contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
+        contents = [
+            types.Content(role="user" if role == "user" else "model", parts=[types.Part(text=text)])
+            for role, text in _history_pairs(history)
+        ]
+        contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
         system_prompt = await self._get_system_prompt()
 
         plan_trail = []
@@ -140,11 +183,13 @@ class NexusAgent:
 
         return PlanResult(text="That request needed too many steps — could you break it into smaller parts?", function_calls=[], provider="gemini", state={}, trail=plan_trail)
 
-    async def _plan_groq(self, user_message: str) -> PlanResult:
+    async def _plan_groq(self, user_message: str, history=None) -> PlanResult:
         all_tools, tool_owner = await self._merged_tools()
         tools_schema = [{"type": "function", "function": t} for t in all_tools]
         system_prompt = await self._get_system_prompt()
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
+        messages = [{"role": "system", "content": system_prompt}]
+        messages += [{"role": role, "content": text} for role, text in _history_pairs(history)]
+        messages.append({"role": "user", "content": user_message})
 
         plan_trail = []
         for _ in range(5):
@@ -173,7 +218,7 @@ class NexusAgent:
             risky = [tc for tc in tool_calls if tc.function.name in STATE_CHANGING_TOOLS]
             if risky:
                 calls = [ToolCall(tc.function.name, json.loads(tc.function.arguments or "{}"), id=tc.id) for tc in tool_calls]
-                return PlanResult(text=None, function_calls=calls, provider="groq", state={"messages": messages, "tool_owner": tool_owner, "tools_schema": tools_schema})
+                return PlanResult(text=None, function_calls=calls, provider="groq", state={"messages": messages, "tool_owner": tool_owner, "tools_schema": tools_schema}, trail=plan_trail)
 
             for tc in tool_calls:
                 args = json.loads(tc.function.arguments or "{}")
@@ -206,15 +251,18 @@ class NexusAgent:
         contents.append(types.Content(role="user", parts=tool_response_parts))
 
         # Give it a few turns to chain safe (non-state-changing) follow-ups,
-        # e.g. "...and send it on WhatsApp" — without needing a second confirmation.
+        # e.g. reading back what was just written — without needing a second
+        # confirmation. The system prompt is carried through so the user's
+        # remembered facts and the "don't answer from memory" rules still apply.
         safe_tools, safe_owner = await self._merged_tools(exclude_state_changing=True)
         gemini_safe_tools = types.Tool(function_declarations=safe_tools)
+        system_prompt = await self._get_system_prompt()
 
         try:
             for _ in range(3):
                 response = await self.gemini_client.aio.models.generate_content(
                     model=GEMINI_MODEL, contents=contents,
-                    config=types.GenerateContentConfig(temperature=0, tools=[gemini_safe_tools]),
+                    config=types.GenerateContentConfig(temperature=0, tools=[gemini_safe_tools], system_instruction=system_prompt),
                 )
                 contents.append(response.candidates[0].content)
                 calls = list(response.function_calls or [])
@@ -231,7 +279,8 @@ class NexusAgent:
                 contents.append(types.Content(role="user", parts=follow_parts))
 
             response = await self.gemini_client.aio.models.generate_content(
-                model=GEMINI_MODEL, contents=contents, config=types.GenerateContentConfig(temperature=0),
+                model=GEMINI_MODEL, contents=contents,
+                config=types.GenerateContentConfig(temperature=0, system_instruction=system_prompt),
             )
             return _safe_text(response), trail
 
@@ -250,7 +299,7 @@ class NexusAgent:
     async def _execute_calls_groq(self, plan_result: PlanResult):
         messages = plan_result.state["messages"]
         tool_owner = plan_result.state["tool_owner"]
-        trail = []
+        trail = list(plan_result.trail or [])
         for fc in plan_result.function_calls:
             result = await tool_owner[fc.name].call_tool(fc.name, fc.args)
             result_text = result.content[0].text if result.content else "[]"
@@ -280,15 +329,19 @@ class NexusAgent:
         await fs_session.initialize()
         self.sessions["filesystem"] = fs_session
 
-        # To-Do server — plain python executable, no wrapper needed
-        todo_params = StdioServerParameters(command="python", args=[TODO_SERVER_PATH])
+        # To-Do server — sys.executable, not "python": a bare "python" resolves
+        # through PATH and can land on a system interpreter without our deps
+        # installed, which shows up as an opaque "Connection closed".
+        todo_params = StdioServerParameters(command=sys.executable, args=[TODO_SERVER_PATH])
         read, write = await self._stack.enter_async_context(stdio_client(todo_params))
         todo_session = await self._stack.enter_async_context(ClientSession(read, write))
         await todo_session.initialize()
         self.sessions["todo"] = todo_session
 
-        # Web Search server — DuckDuckGo, no API key needed
-        search_params = StdioServerParameters(command="duckduckgo-mcp-server", args=[])
+        # Web Search server — DuckDuckGo, no API key needed. Installed as a
+        # console script in the venv, so resolve it the same way as the
+        # interpreter rather than trusting PATH.
+        search_params = StdioServerParameters(command=_console_script("duckduckgo-mcp-server"), args=[])
         read, write = await self._stack.enter_async_context(stdio_client(search_params))
         search_session = await self._stack.enter_async_context(ClientSession(read, write))
         await search_session.initialize()
@@ -341,81 +394,6 @@ class NexusAgent:
         if result.function_calls:
             return "This request needs confirmation in the Nexus UI before I can make changes."
         return result.text
-
-    async def _ask_gemini(self, user_message: str) -> str:
-        all_tools, tool_owner = await self._merged_tools()
-        gemini_tools = types.Tool(function_declarations=all_tools)
-        contents = [types.Content(role="user", parts=[types.Part(text=user_message)])]
-
-        response = await self.gemini_client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools]),
-        )
-        contents.append(response.candidates[0].content)
-
-        print("\n--- Think -> Act -> Observe trail (Gemini) ---")
-        turns = 0
-        while response.function_calls and turns < 5:
-            turns += 1
-            tool_response_parts = []
-            for fc in response.function_calls:
-                args = fc.args or {}
-                print(f"  [Act] Calling {fc.name}({args})")
-                result = await tool_owner[fc.name].call_tool(fc.name, args)
-                result_text = result.content[0].text if result.content else "[]"
-                print(f"  [Observe] {result_text}")
-                tool_response_parts.append(
-                    types.Part.from_function_response(name=fc.name, response={"result": result_text})
-                )
-            contents.append(types.Content(role="user", parts=tool_response_parts))
-            response = await self.gemini_client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(temperature=0, tools=[gemini_tools]),
-            )
-            contents.append(response.candidates[0].content)
-        print("--- end trail ---\n")
-
-        return response.text
-
-    async def _ask_groq(self, user_message: str) -> str:
-        all_tools, tool_owner = await self._merged_tools()
-        tools_schema = [{"type": "function", "function": t} for t in all_tools]
-        messages = [{"role": "user", "content": user_message}]
-
-        response = self.groq_client.chat.completions.create(
-            model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto",
-        )
-        msg = response.choices[0].message
-
-        print("\n--- Think -> Act -> Observe trail (Groq fallback) ---")
-        turns = 0
-        while msg.tool_calls and turns < 5:
-            turns += 1
-            messages.append({
-                "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function",
-                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in msg.tool_calls
-                ],
-            })
-            for call in msg.tool_calls:
-                args = json.loads(call.function.arguments or "{}")
-                print(f"  [Act] Calling {call.function.name}({args})")
-                result = await tool_owner[call.function.name].call_tool(call.function.name, args)
-                result_text = result.content[0].text if result.content else "[]"
-                print(f"  [Observe] {result_text}")
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
-            response = self.groq_client.chat.completions.create(
-                model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto",
-            )
-            msg = response.choices[0].message
-        print("--- end trail ---\n")
-
-        return msg.content
 
     async def proactive_check(self):
         try:
