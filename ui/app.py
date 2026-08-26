@@ -3,14 +3,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import asyncio
+import concurrent.futures
 import html
 import json
 import threading
 
 import streamlit as st
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from streamlit_autorefresh import st_autorefresh
 
-from agent_core.agent import NexusAgent, STATE_CHANGING_TOOLS
+from agent_core.agent import NexusAgent
+
+# Background schedule (local time, see SCHEDULER_TIMEZONE). The two jobs are
+# staggered so the proactive nudge and the daily digest don't arrive together.
+SCHEDULER_TIMEZONE = "Asia/Kolkata"
+PROACTIVE_CHECK_HOUR, PROACTIVE_CHECK_MINUTE = 8, 0
+TASK_SUMMARY_HOUR, TASK_SUMMARY_MINUTE = 8, 15
+
+# Ceilings for blocking calls onto the background loop. Planning includes LLM
+# round trips and tool calls, so it gets a much longer budget than a UI read.
+PLAN_TIMEOUT_SECONDS = 120
+UI_TIMEOUT_SECONDS = 20
 
 
 class BackgroundLoop:
@@ -23,20 +36,55 @@ class BackgroundLoop:
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def run(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+    def run(self, coro, timeout=UI_TIMEOUT_SECONDS):
+        """Run coro on the background loop and wait for it.
+
+        Raises TimeoutError if it doesn't finish in time — without a ceiling a
+        wedged MCP server or hung LLM call freezes Streamlit's script thread
+        for good.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError(f"Timed out after {timeout}s waiting on the agent.")
 
 
 @st.cache_resource
 def get_agent():
     bg = BackgroundLoop()
     agent = NexusAgent()
-    bg.run(agent.connect_servers())
+    bg.run(agent.connect_servers(), timeout=90)
 
     agent.tool_summary = {}
     for name, session in agent.sessions.items():
         tools = bg.run(session.list_tools())
         agent.tool_summary[name] = [t.name for t in tools.tools]
+
+    # Autonomous background work: the proactive check writes notifications the
+    # banner below polls for, and the digest goes straight to WhatsApp. The
+    # scheduler is parked on the agent so it isn't garbage collected.
+    async def _start_scheduler():
+        scheduler = AsyncIOScheduler(
+            event_loop=asyncio.get_running_loop(), timezone=SCHEDULER_TIMEZONE
+        )
+        scheduler.add_job(
+            agent.proactive_check, "cron",
+            hour=PROACTIVE_CHECK_HOUR, minute=PROACTIVE_CHECK_MINUTE,
+            id="proactive_check", coalesce=True, misfire_grace_time=3600,
+        )
+        scheduler.add_job(
+            agent.send_task_summary_whatsapp, "cron",
+            hour=TASK_SUMMARY_HOUR, minute=TASK_SUMMARY_MINUTE,
+            id="task_summary", coalesce=True, misfire_grace_time=3600,
+        )
+        scheduler.start()
+        return scheduler
+
+    agent.scheduler = bg.run(_start_scheduler())
+    for job in agent.scheduler.get_jobs():
+        print(f"[Nexus] Scheduled '{job.id}' — next run {job.next_run_time}")
 
     return agent, bg
 
@@ -292,7 +340,10 @@ if notifications:
     for n in notifications:
         st.info(f"◈ {n['message']}")
     if st.button("Dismiss all"):
-        bg.run(agent.sessions["todo"].call_tool("mark_notifications_seen", {}))
+        try:
+            bg.run(agent.sessions["todo"].call_tool("mark_notifications_seen", {}))
+        except Exception as e:
+            st.warning(f"Couldn't dismiss those: {e}")
         st.rerun()
 
 if st.session_state.pending:
@@ -307,9 +358,15 @@ if st.session_state.pending:
     )
     col1, col2 = st.columns(2)
     if col1.button("Confirm", use_container_width=True):
-        with st.spinner("Executing..."):
-            text, exec_trail = bg.run(agent.execute_calls(st.session_state.pending))
-        full_trail = (st.session_state.pending.trail or []) + exec_trail
+        try:
+            with st.spinner("Executing..."):
+                # execute_calls returns the planning trail plus what it just did,
+                # so this is the complete trace — don't re-add pending.trail.
+                text, full_trail = bg.run(
+                    agent.execute_calls(st.session_state.pending), timeout=PLAN_TIMEOUT_SECONDS
+                )
+        except TimeoutError as e:
+            text, full_trail = f"That took too long and I stopped waiting ({e}).", st.session_state.pending.trail
         st.session_state.messages.append({"role": "assistant", "content": text, "trail": full_trail})
         st.session_state.pending = None
         st.rerun()
@@ -319,9 +376,18 @@ if st.session_state.pending:
         st.rerun()
 else:
     if prompt := st.chat_input("Ask Nexus to check your tasks, files, or the web..."):
+        # Replay the conversation so far (excluding this message) so follow-ups
+        # like "add the second one to my list" resolve against what was said.
+        history = list(st.session_state.messages)
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.spinner("Reasoning..."):
-            plan_result = bg.run(agent.plan(prompt))
+        try:
+            with st.spinner("Reasoning..."):
+                plan_result = bg.run(agent.plan(prompt, history), timeout=PLAN_TIMEOUT_SECONDS)
+        except TimeoutError as e:
+            st.session_state.messages.append(
+                {"role": "assistant", "content": f"That took too long and I stopped waiting ({e}). Try again, or ask for something smaller."}
+            )
+            st.rerun()
 
         if plan_result.function_calls:
             st.session_state.pending = plan_result
