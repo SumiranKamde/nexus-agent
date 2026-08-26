@@ -142,3 +142,9 @@ python tests/manual/check_filesystem_server.py  # read-only
 python tests/manual/check_todo_server.py        # writes to memory/todo.db, then undoes it
 ```
 
+Run `check_providers.py` first if anything is behaving oddly. Groq retires hosted
+models without notice, and a retired id 404s on every call — the fallback goes
+dead while Gemini quietly carries all the traffic. The check detects this and
+prints the models your account can actually use; put a tool-calling one in
+`GROQ_FALLBACK_MODEL` in `agent_core/agent.py`.
+

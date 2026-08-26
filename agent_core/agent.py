@@ -15,7 +15,11 @@ from mcp.client.stdio import stdio_client
 load_dotenv()
 
 GEMINI_MODEL = "gemini-3.1-flash-lite"
-GROQ_FALLBACK_MODEL = "llama-3.3-70b-versatile"
+# Groq retires hosted models without warning, and a retired id fails as a 404 on
+# every call — i.e. the whole fallback path goes dead silently. If you see
+# model_not_found, run tests/manual/check_providers.py and pick a live id from
+# the list it prints; it must support tool calling.
+GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b"
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SANDBOX_PATH = os.path.join(PROJECT_ROOT, "sandbox_files")
@@ -92,6 +96,19 @@ def _safe_text(response, fallback="I'm not able to do that with my current tools
     except Exception:
         return fallback
 
+
+def _describe_trail(trail):
+    """Summarize executed tool calls without an LLM.
+
+    Used when both providers are unreachable *after* tools have already run —
+    the actions are done, so the user needs to be told what happened even if
+    nothing is available to phrase it nicely.
+    """
+    if not trail:
+        return "Done."
+    lines = "\n".join(f"- {name}({args})" for name, args, _result in trail)
+    return f"Done — I ran these, but couldn't reach a model to summarize:\n{lines}"
+
 # How many earlier chat turns to replay into the prompt. Keeps follow-ups like
 # "add the second one to my list" working without unbounded token growth.
 MAX_HISTORY_MESSAGES = 10
@@ -134,9 +151,20 @@ class NexusAgent:
             try:
                 return await self._plan_gemini(user_message, history)
             except Exception as e:
-                print(f"[Nexus] Gemini unavailable ({e}); falling back to Groq Llama...")
+                print(f"[Nexus] Gemini unavailable ({e}); falling back to Groq...")
         if self.groq_client:
-            return await self._plan_groq(user_message, history)
+            try:
+                return await self._plan_groq(user_message, history)
+            except Exception as e:
+                # Last line of defence: both providers are down. Without this the
+                # exception lands in Streamlit's script thread as a raw traceback.
+                print(f"[Nexus] Groq fallback also failed ({e}).")
+                return PlanResult(
+                    text="Both AI providers are unreachable right now, so I can't plan that. "
+                         "Check the terminal for the error — if it mentions model_not_found, "
+                         "GROQ_FALLBACK_MODEL needs updating.",
+                    function_calls=[], provider="none", state={}, trail=[],
+                )
         return PlanResult(
             text="No AI provider is configured. Add GEMINI_API_KEY or GROQ_API_KEY to .env.",
             function_calls=[], provider="none", state={}, trail=[],
@@ -226,6 +254,7 @@ class NexusAgent:
                 result = await tool_owner[tc.function.name].call_tool(tc.function.name, args)
                 result_text = result.content[0].text if result.content else "[]"
                 print(f"[Nexus/Groq] -> {result_text}")
+                plan_trail.append((tc.function.name, args, result_text))
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
 
         return PlanResult(text="That request needed too many steps — could you break it into smaller parts?", function_calls=[], provider="groq", state={}, trail=plan_trail)
@@ -291,10 +320,17 @@ class NexusAgent:
                 "\n".join(f"- {name}({args}) -> {result}" for name, args, result in trail) +
                 "\nWrite a short, friendly 1-2 sentence reply confirming what was done."
             )
-            completion = self.groq_client.chat.completions.create(
-                model=GROQ_FALLBACK_MODEL, messages=[{"role": "user", "content": summary_prompt}],
-            )
-            return completion.choices[0].message.content, trail
+            try:
+                completion = self.groq_client.chat.completions.create(
+                    model=GROQ_FALLBACK_MODEL, messages=[{"role": "user", "content": summary_prompt}],
+                )
+                return completion.choices[0].message.content, trail
+            except Exception as e2:
+                # The tools have already run by this point, so failing here would
+                # leave the user unsure whether their action landed. The trail is
+                # the ground truth — report it directly rather than not at all.
+                print(f"[Nexus] Groq summary also failed ({e2}); reporting the trail directly.")
+                return _describe_trail(trail), trail
 
     async def _execute_calls_groq(self, plan_result: PlanResult):
         messages = plan_result.state["messages"]
@@ -310,12 +346,18 @@ class NexusAgent:
         # No 'tools' passed here on purpose — same trick as the Gemini path.
         # Without tools attached, the model can't chain another call and leave
         # .content empty; it's forced to answer in plain text.
-        response = self.groq_client.chat.completions.create(
-            model=GROQ_FALLBACK_MODEL,
-            messages=messages,
-            temperature=0,
-        )
-        text = response.choices[0].message.content or "Done."
+        try:
+            response = self.groq_client.chat.completions.create(
+                model=GROQ_FALLBACK_MODEL,
+                messages=messages,
+                temperature=0,
+            )
+            text = response.choices[0].message.content or "Done."
+        except Exception as e:
+            # As in the Gemini path: the tools already ran, so report the trail
+            # rather than raising and leaving the user guessing.
+            print(f"[Nexus/Groq] Summary call failed ({e}); reporting the trail directly.")
+            text = _describe_trail(trail)
         return text, trail
 
     async def connect_servers(self):

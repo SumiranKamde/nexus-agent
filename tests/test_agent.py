@@ -11,30 +11,42 @@ from agent_core.agent import (
 
 
 class FakeTodoSession:
+    def __init__(self, tools=()):
+        self._tools = [
+            SimpleNamespace(name=name, description="", inputSchema={"type": "object", "properties": {}})
+            for name in tools
+        ]
+
     async def list_tools(self):
-        return SimpleNamespace(tools=[])
+        return SimpleNamespace(tools=self._tools)
 
     async def call_tool(self, _name, _args):
         return SimpleNamespace(content=[SimpleNamespace(text="[]")])
 
 
 class FakeGroqClient:
-    """Stands in for the Groq SDK and records the kwargs it was called with."""
+    """Stands in for the Groq SDK and records the kwargs it was called with.
+
+    Set .scripted to a list of tool_calls lists to drive a multi-turn plan; each
+    create() pops the next entry. Defaults to a single tool-free reply.
+    """
 
     def __init__(self):
         self.chat = SimpleNamespace(completions=self)
         self.calls = []
+        self.scripted = None
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        message = SimpleNamespace(content="Groq fallback works", tool_calls=[])
+        tool_calls = self.scripted.pop(0) if self.scripted else []
+        message = SimpleNamespace(content="Groq fallback works", tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
-def make_agent():
+def make_agent(todo_tools=()):
     agent = object.__new__(NexusAgent)
     agent.groq_client = FakeGroqClient()
-    agent.sessions = {"todo": FakeTodoSession()}
+    agent.sessions = {"todo": FakeTodoSession(todo_tools)}
     return agent
 
 
@@ -107,6 +119,26 @@ class HistoryTests(unittest.TestCase):
 
         sent = agent.groq_client.calls[0]["messages"]
         self.assertEqual([m["role"] for m in sent], ["system", "user"])
+
+
+class TrailTests(unittest.TestCase):
+    def test_groq_records_auto_executed_read_only_calls_in_the_trail(self):
+        """The trace log is the app's transparency story — it must not go blank
+        on the fallback provider. This asymmetry shipped once already: the Gemini
+        path appended to the trail and the Groq path didn't."""
+        agent = make_agent(todo_tools=["list_tasks"])
+        # First response asks for a read-only tool, second answers in plain text.
+        agent.groq_client.scripted = [
+            [SimpleNamespace(
+                id="call_1",
+                function=SimpleNamespace(name="list_tasks", arguments="{}"),
+            )],
+            [],
+        ]
+
+        result = asyncio.run(agent._plan_groq("how many tasks do I have?"))
+
+        self.assertEqual(result.trail, [("list_tasks", {}, "[]")])
 
 
 if __name__ == "__main__":

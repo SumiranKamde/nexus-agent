@@ -17,7 +17,7 @@ from mcp.client.stdio import stdio_client
 
 from agent_core.agent import TODO_SERVER_PATH
 
-server_params = StdioServerParameters(command="python", args=[TODO_SERVER_PATH])
+server_params = StdioServerParameters(command=sys.executable, args=[TODO_SERVER_PATH])
 
 
 def show(result):
