@@ -4,4 +4,4 @@ __pycache__/
 *.pyc
 *.db
 memory/
-.streamlit/
+.pytest_cache/

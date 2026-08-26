@@ -1,11 +1,24 @@
+"""Manual check: does the to-do MCP server round-trip a task?
+
+    python tests/manual/check_todo_server.py
+
+WRITES TO memory/todo.db — it adds a task, completes it, then undoes the
+completion so the database is left as it was found.
+"""
 import asyncio
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-server_params = StdioServerParameters(
-    command="python",
-    args=["mcp_servers/todo_server.py"],
-)
+from agent_core.agent import TODO_SERVER_PATH
+
+server_params = StdioServerParameters(command="python", args=[TODO_SERVER_PATH])
+
 
 def show(result):
     """Safely print a tool result, whether or not it has content blocks."""
@@ -15,6 +28,12 @@ def show(result):
         print(result.structured_content)
     else:
         print("[]")
+    return result
+
+
+def payload(result):
+    return json.loads(result.content[0].text) if result.content else []
+
 
 async def main():
     async with stdio_client(server_params) as (read, write):
@@ -27,21 +46,27 @@ async def main():
                 print(" -", t.name)
 
             print("\nAdding a task...")
-            result = await session.call_tool("add_task", {"task": "Buy groceries", "due": "tomorrow"})
-            show(result)
+            show(await session.call_tool(
+                "add_task", {"task": "[check] round-trip probe", "due": "tomorrow"}
+            ))
 
             print("\nListing tasks...")
-            result = await session.call_tool("list_tasks", {})
-            show(result)
+            tasks = payload(show(await session.call_tool("list_tasks", {})))
 
-            print("\nCompleting the task we just saw above...")
-            tasks = await session.call_tool("list_tasks", {})
-            # (we already know task 1 exists from your last run — safe to reuse)
-            result = await session.call_tool("complete_task", {"task_id": 1})
-            show(result)
+            probe = next((t for t in tasks if t["task"] == "[check] round-trip probe"), None)
+            if probe is None:
+                print("\nCouldn't find the task we just added — stopping.")
+                return
 
-            print("\nListing tasks again (should be empty)...")
-            result = await session.call_tool("list_tasks", {})
-            show(result)
+            print(f"\nCompleting task {probe['id']}...")
+            show(await session.call_tool("complete_task", {"task_id": probe["id"]}))
+
+            print("\nListing tasks again (the probe should be gone)...")
+            show(await session.call_tool("list_tasks", {}))
+
+            print("\nUndoing, so the database is left as we found it...")
+            show(await session.call_tool("undo_last_action", {}))
+            show(await session.call_tool("undo_last_action", {}))
+
 
 asyncio.run(main())
