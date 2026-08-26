@@ -21,7 +21,14 @@ SANDBOX_PATH = os.path.join(PROJECT_ROOT, "sandbox_files")
 TODO_SERVER_PATH = os.path.join(PROJECT_ROOT, "mcp_servers", "todo_server.py")
 STATE_CHANGING_TOOLS = {
     "write_file", "edit_file", "create_directory", "move_file",
-    "add_task", "complete_task", "undo_last_action",
+    "delete_file", "delete_directory",
+    "add_task", "complete_task", "undo_last_action", "remember", "forget",
+    "create_notification", "mark_notifications_seen", "send_whatsapp",
+    "send_file_via_whatsapp",
+}
+# Tools the proactive check is allowed to call directly (notifications + reads)
+PROACTIVE_ALLOWED_STATE_TOOLS = {
+    "create_notification", "send_whatsapp", "send_file_via_whatsapp",
 }
 SYSTEM_PROMPT = (
     "You are Nexus, a friendly personal productivity assistant. You have access to a set of "
@@ -30,9 +37,7 @@ SYSTEM_PROMPT = (
     "conversations (remember, list_memories, forget), and sending WhatsApp messages to the user's "
     "phone. Always check the full list of tools provided to you for this request before deciding "
     "whether one applies — do not assume a request has no matching tool just because it isn't "
-    "explicitly named here.\n\n . Always check the full list of tools "
-    "provided to you for this request before deciding whether one applies — do not assume a "
-    "request has no matching tool just because it isn't explicitly named here.\n\n"
+    "explicitly named here.\n\n"
     "If the user shares a lasting preference, habit, or personal detail (e.g. 'I prefer evening "
     "reminders', 'my name is Sumiran', 'I usually add groceries on Fridays'), use the remember "
     "tool to save it — but don't save trivial one-off details.\n\n"
@@ -56,8 +61,6 @@ PROACTIVE_PROMPT = (
     "now, do not call any tool."
 )
 
-
-
 @dataclass
 class ToolCall:
     name: str
@@ -72,20 +75,33 @@ class PlanResult:
     state: dict
     trail: list = None
 
+def _safe_text(response, fallback="I'm not able to do that with my current tools — could you rephrase, or ask for something else?"):
+    try:
+        return response.text or fallback
+    except Exception:
+        return fallback
 
 class NexusAgent:
     def __init__(self):
-        self.gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        self.groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        groq_key = os.environ.get("GROQ_API_KEY")
+        self.gemini_client = genai.Client(api_key=gemini_key) if gemini_key else None
+        self.groq_client = Groq(api_key=groq_key) if groq_key else None
         self.sessions = {}
         self._stack = AsyncExitStack()
 
     async def plan(self, user_message: str) -> PlanResult:
-        try:
-            return await self._plan_gemini(user_message)
-        except Exception as e:
-            print(f"[Nexus] Gemini unavailable ({e}); falling back to Groq Llama...")
+        if self.gemini_client:
+            try:
+                return await self._plan_gemini(user_message)
+            except Exception as e:
+                print(f"[Nexus] Gemini unavailable ({e}); falling back to Groq Llama...")
+        if self.groq_client:
             return await self._plan_groq(user_message)
+        return PlanResult(
+            text="No AI provider is configured. Add GEMINI_API_KEY or GROQ_API_KEY to .env.",
+            function_calls=[], provider="none", state={}, trail=[],
+        )
 
     async def _plan_gemini(self, user_message: str) -> PlanResult:
         all_tools, tool_owner = await self._merged_tools()
@@ -131,23 +147,23 @@ class NexusAgent:
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
 
         plan_trail = []
-        for turn in range(5):
+        for _ in range(5):
             response = None
-        for attempt in range(2):
-            try:
-                response = self.groq_client.chat.completions.create(
-                    model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto", temperature=0,
-                )
-                break
-            except BadRequestError as e:
-                print(f"[Nexus/Groq] Malformed tool call (attempt {attempt + 1}/2): {e}")
-        if response is None:
-            return PlanResult(text="I'm having trouble planning that request — could you try rephrasing?", function_calls=[], provider="groq", state={}, trail=[])
+            for attempt in range(2):
+                try:
+                    response = self.groq_client.chat.completions.create(
+                        model=GROQ_FALLBACK_MODEL, messages=messages, tools=tools_schema, tool_choice="auto", temperature=0,
+                    )
+                    break
+                except BadRequestError as e:
+                    print(f"[Nexus/Groq] Malformed tool call (attempt {attempt + 1}/2): {e}")
+            if response is None:
+                return PlanResult(text="I'm having trouble planning that request — could you try rephrasing?", function_calls=[], provider="groq", state={}, trail=[])
             msg = response.choices[0].message
             tool_calls = msg.tool_calls or []
 
             if not tool_calls:
-                return PlanResult(text=msg.content or "I'm not sure how to respond to that — could you rephrase?", function_calls=[], provider="groq", state={})
+                return PlanResult(text=msg.content or "I'm not sure how to respond to that — could you rephrase?", function_calls=[], provider="groq", state={}, trail=plan_trail)
 
             messages.append({
                 "role": "assistant", "content": msg.content,
@@ -167,7 +183,8 @@ class NexusAgent:
                 print(f"[Nexus/Groq] -> {result_text}")
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
 
-        return PlanResult(text="That request needed too many steps — could you break it into smaller parts?", function_calls=[], provider="groq", state={})
+        return PlanResult(text="That request needed too many steps — could you break it into smaller parts?", function_calls=[], provider="groq", state={}, trail=plan_trail)
+
     async def execute_calls(self, plan_result: PlanResult):
         if plan_result.provider == "gemini":
             return await self._execute_calls_gemini(plan_result)
@@ -251,6 +268,7 @@ class NexusAgent:
         )
         text = response.choices[0].message.content or "Done."
         return text, trail
+
     async def connect_servers(self):
         # Filesystem server — Windows needs npx launched through cmd /c
         fs_params = StdioServerParameters(
@@ -283,19 +301,27 @@ class NexusAgent:
     async def close(self):
         await self._stack.aclose()
 
-    async def _merged_tools(self, exclude_state_changing=False):
+    async def _merged_tools(self, exclude_state_changing=False, allowed_state_tools=None):
+        """Return (tool_declarations, tool_owner_map).
+
+        Args:
+            exclude_state_changing: If True, omit state-changing tools.
+            allowed_state_tools:   If given (set), these state-changing tools
+                                   are kept even when exclude_state_changing is True.
+        """
+        allowed = allowed_state_tools or set()
         all_tools = []
         tool_owner = {}
         for session in self.sessions.values():
             mcp_tools = (await session.list_tools()).tools
             for t in mcp_tools:
-                if exclude_state_changing and t.name in STATE_CHANGING_TOOLS:
+                if exclude_state_changing and t.name in STATE_CHANGING_TOOLS and t.name not in allowed:
                     continue
                 clean_schema = {k: v for k, v in t.inputSchema.items() if k not in ("additionalProperties", "$schema")}
                 all_tools.append({"name": t.name, "description": t.description or "", "parameters": clean_schema})
                 tool_owner[t.name] = session
         return all_tools, tool_owner
-    
+
     async def _get_system_prompt(self) -> str:
         try:
             result = await self.sessions["todo"].call_tool("list_memories", {})
@@ -310,11 +336,11 @@ class NexusAgent:
         return SYSTEM_PROMPT
 
     async def ask(self, user_message: str) -> str:
-        try:
-            return await self._ask_gemini(user_message)
-        except Exception as gemini_error:
-            print(f"[Nexus] Gemini unavailable ({gemini_error}); falling back to Groq Llama...")
-            return await self._ask_groq(user_message)
+        """Compatibility wrapper that never bypasses the confirmation workflow."""
+        result = await self.plan(user_message)
+        if result.function_calls:
+            return "This request needs confirmation in the Nexus UI before I can make changes."
+        return result.text
 
     async def _ask_gemini(self, user_message: str) -> str:
         all_tools, tool_owner = await self._merged_tools()
@@ -390,7 +416,7 @@ class NexusAgent:
         print("--- end trail ---\n")
 
         return msg.content
-    
+
     async def proactive_check(self):
         try:
             await self._proactive_gemini()
@@ -402,7 +428,10 @@ class NexusAgent:
                 print(f"[Nexus/Proactive] Skipped this cycle — both providers failed: {e2}")
 
     async def _proactive_gemini(self):
-        all_tools, tool_owner = await self._merged_tools(exclude_state_changing=True)
+        all_tools, tool_owner = await self._merged_tools(
+            exclude_state_changing=True,
+            allowed_state_tools=PROACTIVE_ALLOWED_STATE_TOOLS,
+        )
         gemini_tools = types.Tool(function_declarations=all_tools)
         contents = [types.Content(role="user", parts=[types.Part(text=PROACTIVE_PROMPT)])]
 
@@ -439,7 +468,10 @@ class NexusAgent:
             print("[Nexus/Proactive] Cycle complete — nothing surfaced.")
 
     async def _proactive_groq(self):
-        all_tools, tool_owner = await self._merged_tools(exclude_state_changing=True)
+        all_tools, tool_owner = await self._merged_tools(
+            exclude_state_changing=True,
+            allowed_state_tools=PROACTIVE_ALLOWED_STATE_TOOLS,
+        )
         tools_schema = [{"type": "function", "function": t} for t in all_tools]
         messages = [{"role": "system", "content": await self._get_system_prompt()}, {"role": "user", "content": PROACTIVE_PROMPT}]
 
@@ -477,7 +509,7 @@ class NexusAgent:
 
         if not notified:
             print("[Nexus/Proactive] Cycle complete — nothing surfaced.")
-            
+
     async def send_task_summary_whatsapp(self):
         try:
             result = await self.sessions["todo"].call_tool("list_tasks", {})
@@ -491,21 +523,3 @@ class NexusAgent:
             print(f"[Nexus/Scheduled] Task summary: {send_result.content[0].text if send_result.content else send_result}")
         except Exception as e:
             print(f"[Nexus/Scheduled] Failed to send task summary: {e}")
-   
-
-async def main():
-    agent = NexusAgent()
-    await agent.connect_servers()
-    try:
-        reply = await agent.ask("Add 'buy groceries' to my to-do list, then list everything on it.")
-        print("Nexus:", reply)
-    finally:
-        await agent.close()
-        
-async def main():
-    agent = NexusAgent()
-    await agent.connect_servers()
-    t
-
-if __name__ == "__main__":
-    asyncio.run(main())

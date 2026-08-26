@@ -1,1 +1,11 @@
-Nexus is a personal productivity assistant designed to help users manage their daily tasks, organize files, and stay informed. With a suite of tools at its disposal, Nexus can handle file operations, maintain a to-do list, search the web for real-time information, and even send notifications or messages via WhatsApp. Nexus is built to be helpful, efficient, and personalized, remembering user preferences to provide a tailored experience.
+Project Name: Nexus
+Description: Nexus is a personal productivity assistant designed to help users manage tasks, files, and information efficiently.
+Capabilities:
+- File management (create, read, edit, search, list)
+- To-do list management (add, complete, list, audit, undo)
+- Web searching and content extraction
+- Memory management (remember, list, forget)
+- WhatsApp integration for notifications and file sharing
+- Time and date tracking
+- Proactive notifications
+Goal: To provide a seamless, personalized assistant experience for users like Sumiran.

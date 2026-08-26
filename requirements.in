@@ -1,0 +1,10 @@
+# Application-level dependencies for reproducible installs.
+google-genai==2.11.0
+groq==1.5.0
+mcp==1.28.1
+fastmcp==3.4.4
+python-dotenv==1.2.2
+twilio==9.10.9
+streamlit==1.59.1
+streamlit-autorefresh==1.0.1
+duckduckgo-mcp-server==0.5.0

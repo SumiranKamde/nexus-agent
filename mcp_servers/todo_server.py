@@ -2,10 +2,9 @@ from fastmcp import FastMCP
 import sqlite3
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 from twilio.rest import Client as TwilioClient
 
@@ -30,7 +29,10 @@ mcp = FastMCP("todo-server")
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "memory", "todo.db")
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,16 +89,18 @@ def add_task(task: str, due: str = "") -> str:
     new_id = cursor.lastrowid
     conn.close()
     result = f"Added: {task} (id {new_id})"
-    log_action("add_task", {"task": task, "due": due}, result)
+    log_action("add_task", {"task": task, "due": due, "task_id": new_id}, result)
     return result
 
 @mcp.tool()
 def complete_task(task_id: int) -> str:
     """Mark a to-do item as done."""
     conn = get_conn()
-    conn.execute("UPDATE tasks SET done = 1 WHERE id = ?", (task_id,))
+    cursor = conn.execute("UPDATE tasks SET done = 1 WHERE id = ? AND done = 0", (task_id,))
     conn.commit()
     conn.close()
+    if cursor.rowcount == 0:
+        return f"No open task found with id {task_id}"
     result = f"Task {task_id} marked complete"
     log_action("complete_task", {"task_id": task_id}, result)
     return result
@@ -116,9 +120,12 @@ def undo_last_action() -> str:
     args = json.loads(args_json)
 
     if tool_name == "add_task":
-        # Undo an add by deleting the most recently added task with matching text
-        conn.execute("DELETE FROM tasks WHERE id = (SELECT id FROM tasks WHERE task = ? ORDER BY id DESC LIMIT 1)", (args["task"],))
-        outcome = f"Removed task: {args['task']}"
+        task_id = args.get("task_id")
+        if task_id is None:
+            conn.close()
+            return "This older task action cannot be safely undone."
+        cursor = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        outcome = f"Removed task {task_id}" if cursor.rowcount else f"Task {task_id} no longer exists"
     elif tool_name == "complete_task":
         conn.execute("UPDATE tasks SET done = 0 WHERE id = ?", (args["task_id"],))
         outcome = f"Task {args['task_id']} marked incomplete again"
@@ -139,6 +146,7 @@ def get_audit_log(limit: int = 10) -> list:
     ).fetchall()
     conn.close()
     return [{"time": r[0], "tool": r[1], "args": r[2], "result": r[3], "risk": r[4]} for r in rows]
+
 @mcp.tool()
 def list_tasks() -> list:
     """List all open (not yet completed) to-do items."""
@@ -170,9 +178,11 @@ def list_memories() -> list:
 def forget(memory_id: int) -> str:
     """Delete a specific remembered fact by its id (use list_memories first to find the id)."""
     conn = get_conn()
-    conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    cursor = conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
     conn.commit()
     conn.close()
+    if cursor.rowcount == 0:
+        return f"Memory {memory_id} was not found"
     result = f"Forgot memory {memory_id}"
     log_action("forget", {"memory_id": memory_id}, result)
     return result
@@ -199,10 +209,10 @@ def list_notifications(unseen_only: bool = True) -> list:
 def mark_notifications_seen() -> str:
     """Mark all notifications as seen/dismissed."""
     conn = get_conn()
-    conn.execute("UPDATE notifications SET seen = 1")
+    cursor = conn.execute("UPDATE notifications SET seen = 1 WHERE seen = 0")
     conn.commit()
     conn.close()
-    return "All notifications marked as seen"
+    return f"Marked {cursor.rowcount} notification(s) as seen"
 
 TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
@@ -229,18 +239,20 @@ SANDBOX_PATH = os.path.join(os.path.dirname(__file__), "..", "sandbox_files")
 def send_file_via_whatsapp(file_name: str) -> str:
     """Read a text file from the sandbox folder and send its contents to the user's WhatsApp."""
     file_path = os.path.join(SANDBOX_PATH, file_name)
-    if not os.path.abspath(file_path).startswith(os.path.abspath(SANDBOX_PATH)):
+    sandbox_root = os.path.realpath(SANDBOX_PATH)
+    resolved_path = os.path.realpath(file_path)
+    if os.path.commonpath([sandbox_root, resolved_path]) != sandbox_root:
         return "Refused: file must be inside the sandbox folder."
-    if not os.path.isfile(file_path):
+    if not os.path.isfile(resolved_path):
         return f"File not found: {file_name}"
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(resolved_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except Exception as e:
         return f"Could not read file: {e}"
 
     original_len = len(content)
-    prefix = f"📄 {file_name}:\n\n"
+    prefix = f"\U0001f4c4 {file_name}:\n\n"
     suffix = "\n...(truncated, file exceeds WhatsApp's 1600-character message limit)"
     max_total = 1550  # safety margin below Twilio's hard 1600-char limit
     max_content_len = max_total - len(prefix) - len(suffix)
@@ -261,5 +273,6 @@ def send_file_via_whatsapp(file_name: str) -> str:
         result = f"Failed to send file via WhatsApp: {e}"
     log_action("send_file_via_whatsapp", {"file_name": file_name}, result)
     return result
+
 if __name__ == "__main__":
     mcp.run()
