@@ -1,4 +1,5 @@
-# Application-level dependencies for reproducible installs.
+# Cross-platform requirements for Streamlit Cloud (Linux).
+# Generated from requirements.in — excludes Windows-only packages (pywin32).
 google-genai==2.11.0
 groq==1.5.0
 mcp==1.28.1
