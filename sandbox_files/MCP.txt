@@ -1,0 +1,10 @@
+MCP (Model Context Protocol) is an open standard that enables AI assistants to connect to systems, data, and tools securely and efficiently. It provides a universal way for AI models to interact with local and remote resources, such as file systems, databases, and APIs.
+
+In the context of this project, MCP is used to empower the AI assistant (Nexus) with capabilities like:
+- File system management (reading, writing, editing, listing files).
+- Task management (to-do lists, audit logs).
+- Web searching and content extraction.
+- Personalization through memory management.
+- Communication via WhatsApp integration.
+
+By using MCP, this project creates a modular and extensible environment where the AI can perform real-world actions, making it a highly capable personal productivity assistant for Sumiran.

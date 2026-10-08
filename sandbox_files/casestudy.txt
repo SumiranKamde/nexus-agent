@@ -1,0 +1,227 @@
+# CASE STUDY
+
+## **Title**
+
+### **Digital Arrest Scam in India (2025–2026): A Case Study on AI-Enabled Social Engineering and Cyber Fraud**
+
+**Submitted By:**
+
+* **Sumiran Kamde** – Roll No. **B-72**
+* **Dhanashree Irdande** – Roll No. **66**
+
+---
+
+# Abstract
+
+The Digital Arrest Scam has emerged as one of the most dangerous cyber frauds in India. Criminals impersonate officials from agencies such as the CBI, Mumbai Police, Delhi Police, Narcotics Bureau, or RBI and falsely inform victims that they are involved in crimes such as money laundering, drug trafficking, or identity theft. Victims are threatened with immediate arrest and are forced to stay on continuous video calls while transferring money to so-called "safe" government accounts. This case study examines the working of these scams, evidence collected by investigators, legal actions taken, and preventive measures.
+
+---
+
+# Keywords
+
+Cybercrime, Digital Arrest Scam, Social Engineering, Online Fraud, Cyber Forensics, Digital Evidence, Information Technology Act, Financial Fraud
+
+---
+
+# Introduction
+
+With the rapid growth of digital banking and online communication, cybercriminals have developed sophisticated techniques to deceive people. One such method is the Digital Arrest Scam, where fraudsters exploit fear and authority instead of technical hacking.
+
+The scam relies heavily on psychological manipulation. Victims believe they are speaking with genuine police officers or government officials and often comply without verifying the claims. In many cases, victims lose their life savings within hours.
+
+---
+
+# Case Scenario
+
+### Background
+
+During 2025–2026, India witnessed a significant increase in Digital Arrest scams. Fraudsters contacted victims through phone calls, WhatsApp, or video conferencing applications.
+
+The caller claimed that:
+
+* The victim's Aadhaar number or mobile number was linked to criminal activity.
+* A parcel containing illegal drugs or fake passports had been seized.
+* The victim's bank account was being investigated for money laundering.
+* A warrant had been issued against the victim.
+
+The criminals displayed fake police uniforms, forged identity cards, fake FIRs, and fabricated court documents during video calls to convince victims of the authenticity of the investigation.
+
+Victims were instructed not to contact family members or lawyers and were kept under continuous surveillance through video calls. They were then directed to transfer money into "government verification accounts" for investigation purposes.
+
+After receiving the money, the scammers immediately transferred it through multiple bank accounts and cryptocurrency wallets, making recovery difficult.
+
+---
+
+# Modus Operandi (Attack Process)
+
+1. Collection of victim information through leaked databases and public records.
+2. Phone call from a person impersonating police or CBI officers.
+3. Fake accusations involving money laundering or illegal courier parcels.
+4. Fake video conference showing officials in police uniforms.
+5. Presentation of forged legal documents.
+6. Psychological pressure and threats of immediate arrest.
+7. Transfer of money to multiple bank accounts.
+8. Money laundering using mule accounts and cryptocurrency.
+9. Destruction of digital evidence and closure of fake accounts.
+
+---
+
+# Evidence Collected During Investigation
+
+Investigating agencies collected several forms of digital evidence, including:
+
+### 1. Call Detail Records (CDRs)
+
+* Mobile numbers used by fraudsters
+* Duration of calls
+* Location analysis
+
+### 2. WhatsApp Chat Logs
+
+* Threat messages
+* Fake legal notices
+* Shared documents
+* Video call records
+
+### 3. Bank Transaction Records
+
+* NEFT/RTGS/IMPS transactions
+* Beneficiary account details
+* Frozen bank accounts
+* Money trail analysis
+
+### 4. Digital Devices
+
+* Mobile phones
+* Laptops
+* SIM cards
+* Hard disks
+* Routers
+
+### 5. CCTV Footage
+
+* ATM withdrawals
+* Bank visits
+* Suspect movement
+
+### 6. IP Address Analysis
+
+* Login locations
+* VPN usage
+* Internet Service Provider records
+
+### 7. Email Records
+
+* Fake government emails
+* Fraudulent notices
+* Recovery scams
+
+### 8. Forensic Examination
+
+* Deleted files recovery
+* Mobile forensic imaging
+* Browser history
+* Cryptocurrency wallet analysis
+
+---
+
+# Investigation Process
+
+The Cyber Crime Police followed these major steps:
+
+* Victim complaint registered through the National Cyber Crime Reporting Portal.
+* FIR lodged under relevant sections of law.
+* Bank accounts frozen immediately.
+* Digital devices seized for forensic examination.
+* Mobile numbers tracked through telecom operators.
+* IP addresses traced.
+* Coordination with banks, telecom companies, CERT-In, and interstate cybercrime units.
+* Arrest of suspects and interrogation.
+* Filing of charge sheet before the competent court.
+
+---
+
+# Legal Provisions Applied
+
+### Information Technology Act, 2000
+
+* Section 66C – Identity Theft
+* Section 66D – Cheating by Personation Using Computer Resources
+
+### Bharatiya Nyaya Sanhita (BNS), 2023
+
+* Cheating
+* Criminal intimidation
+* Forgery
+* Impersonation
+* Criminal conspiracy
+
+### Other Applicable Laws
+
+* Prevention of Money Laundering Act (where applicable)
+* Reserve Bank of India guidelines
+* Digital banking fraud regulations
+
+---
+
+# Legal Proceedings
+
+The growing number of digital arrest scams prompted coordinated action by Indian law-enforcement agencies. The Supreme Court initiated proceedings aimed at improving investigation of these scams and directed stronger coordination among agencies such as the CBI, banks, telecom operators, and cybercrime units. The Court also emphasized the seriousness of these offences, indicating that bail for accused persons should be granted only in exceptional circumstances.
+
+In several investigations during 2026:
+
+* Police arrested members of organised fraud networks.
+* Multiple mule bank accounts were frozen.
+* SIM cards, mobile phones, laptops, ATM cards, and forged identity documents were seized.
+* Large sums of stolen money were traced and partially recovered in some cases.
+
+---
+
+# Impact on Victims
+
+* Loss of life savings
+* Severe mental stress
+* Anxiety and depression
+* Loss of trust in digital banking
+* Family disputes
+* Financial instability
+* Increased cyber awareness among citizens
+
+---
+
+# Preventive Measures
+
+* Never trust threats of "digital arrest."
+* Police or courts never demand money over phone or video call.
+* Verify every call through official government numbers.
+* Never share OTPs, passwords, or banking credentials.
+* Report suspicious calls immediately to the Cyber Crime Helpline (1930) or the National Cyber Crime Reporting Portal.
+* Enable multi-factor authentication on financial accounts.
+* Regularly educate family members, especially senior citizens, about cyber fraud.
+
+---
+
+# Lessons Learned
+
+* Human psychology is often the weakest link in cybersecurity.
+* Public awareness is as important as technological security.
+* Fast reporting significantly improves the chances of recovering stolen funds.
+* Coordination between banks, telecom companies, and law enforcement is essential.
+* AI-based fraud detection and stronger digital identity verification can help reduce such crimes.
+
+---
+
+# Conclusion
+
+The Digital Arrest Scam demonstrates how cybercriminals exploit fear, authority, and technology to commit financial fraud without physically confronting victims. It highlights the growing importance of cyber awareness, digital forensics, and coordinated law-enforcement efforts. Recent investigations and judicial actions show that India is strengthening its response through stricter investigations, faster freezing of fraudulent accounts, and tougher treatment of organised cybercrime. However, public education remains the strongest defense. Every citizen should verify suspicious communications, avoid acting under pressure, and report incidents immediately to help prevent further victimization.
+
+---
+
+# References
+
+1. Ministry of Home Affairs – National Cyber Crime Reporting Portal.
+2. Information Technology Act, 2000.
+3. Bharatiya Nyaya Sanhita (BNS), 2023.
+4. Reserve Bank of India – Cyber Security Awareness Guidelines.
+5. CERT-In Security Advisories.
+6. Supreme Court proceedings relating to digital arrest scams and recent media reports on investigations and arrests.

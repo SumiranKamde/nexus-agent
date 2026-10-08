@@ -1,4 +1,17 @@
 venv/
 .env
+.streamlit/secrets.toml
 __pycache__/
+*.py[cod]
+*$py.class
 *.db
+memory/
+.pytest_cache/
+.claude/
+sandbox_files/uploads/*
+!sandbox_files/uploads/.gitkeep
+*.log
+*.tmp
+.cache/
+.coverage
+htmlcov/
